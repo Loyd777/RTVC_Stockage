@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Vimeo - Interface NAS Distant</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f6f9;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        }
+        h1 { color: #1e3a8a; text-align: center; margin-bottom: 30px; }
+        h2 { color: #2563eb; border-bottom: 2px solid #e5e7eb; padding-bottom: 8px; margin-top: 30px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: 600; }
+        input[type="text"], input[type="password"], input[type="file"] {
+            width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box;
+        }
+        button {
+            background-color: #2563eb; color: white; border: none; padding: 12px 20px;
+            border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; margin-top: 10px;
+        }
+        button:hover { background-color: #1d4ed8; }
+        .btn-secondary { background-color: #4b5563; }
+        .btn-secondary:hover { background-color: #374151; }
+        
+        /* Bandeau de bienvenue personnalisé */
+        #welcome-banner {
+            display: none; background-color: #d1e7dd; color: #0f5132; padding: 15px;
+            border-radius: 8px; margin-bottom: 25px; text-align: center; font-weight: bold;
+            border: 1px solid #badbcc; font-size: 1.1em;
+        }
+        
+        #dashboard { display: none; }
+        .file-list { background: #f8fafc; border: 1px solid #e2e8f0; padding: 15px; border-radius: 6px; list-style-type: none; margin: 10px 0; padding-left: 20px;}
+        .file-item { padding: 8px 0; border-bottom: 1px solid #e2e8f0; font-family: monospace; }
+        .file-item:last-child { border-bottom: none; }
+        .status-msg { margin-top: 10px; font-weight: bold; text-align: center; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🎬 Mini Vimeo API Dashboard</h1>
+
+    <div id="welcome-banner">
+        👋 Bienvenue <span id="connected-user"></span> ! Connexion sécurisée au NAS distant établie avec succès.
+    </div>
+
+    <div id="login-section">
+        <h2>Connexion (Utilisateurs de la base PostgreSQL)</h2>
+        <form id="login-form">
+            <div class="form-group">
+                <label id="login-label" for="username">Nom d'utilisateur / Email</label>
+                <input type="text" id="username" required placeholder="Entre ton identifiant enregistré">
+            </div>
+            <div class="form-group">
+                <label for="password">Mot de passe</label>
+                <input type="password" id="password" required placeholder="••••••••">
+            </div>
+            <button type="submit">Se connecter</button>
+        </form>
+    </div>
+
+    <div id="dashboard">
+        <h2>📁 Contenu Physique du NAS Distant</h2>
+        <p>Dossier ciblé : <code>/volume1/NAS/RTVC/</code> (Île-de-France)</p>
+        <button class="btn-secondary" id="btn-list-files">Actualiser la liste du NAS</button>
+        <div id="nas-info" style="margin-top: 10px; font-weight: bold;"></div>
+        <ul id="files-display" class="file-list">
+            <li style="color: #64748b; font-style: italic;">Clique sur le bouton pour interroger le stockage...</li>
+        </ul>
+
+        <h2>🚀 Upload Direct de Vidéo (Rennes ➡️ Île-de-France)</h2>
+        <form id="upload-form">
+            <div class="form-group">
+                <label for="video-title">Titre de la vidéo</label>
+                <input type="text" id="video-title" required placeholder="Ex: Interview Juin">
+            </div>
+            <div class="form-group">
+                <label for="video-file">Fichier vidéo (.mp4)</label>
+                <input type="file" id="video-file" accept="video/mp4" required>
+            </div>
+            <button type="submit" style="background-color: #10b981;">Lancer l'envoi SFTP</button>
+        </form>
+        <div id="upload-status" class="status-msg"></div>
+    </div>
+</div>
+
+<script>
+    const API_URL = "http://127.0.0.1:8000/docs#/"; 
+
+    // --- SOUBOUMISSION DU LOGIN ---
+    document.getElementById("login-form").addEventListener("submit", function(e) {
+        e.preventDefault();
+        
+        const usernameInput = document.getElementById("username").value;
+        const passwordInput = document.getElementById("password").value;
+
+        const formData = new URLSearchParams();
+        // 💡 Note : Si ton API utilise le champ "email", remplace "username" par "email" ci-dessous
+        formData.append("username", usernameInput); 
+        formData.append("password", passwordInput);
+
+        fetch(`${API_URL}/token`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) throw new Error("Identifiants incorrects ou API éteinte.");
+            return response.json();
+        })
+        .then(data => {
+            localStorage.setItem("access_token", data.access_token);
+
+            // Déclenchement visuel du bandeau vert de bienvenue
+            document.getElementById("connected-user").innerText = usernameInput;
+            document.getElementById("welcome-banner").style.display = "block";
+            
+            document.getElementById("login-section").style.display = "none";
+            document.getElementById("dashboard").style.display = "block";
+        })
+        .catch(err => alert(err.message));
+    });
+
+    // --- DEMANDE DE LISTING AU SYNOLOGY ---
+    document.getElementById("btn-list-files").addEventListener("click", function() {
+        const token = localStorage.getItem("access_token");
+        const listContainer = document.getElementById("files-display");
+        const infoContainer = document.getElementById("nas-info");
+        
+        listContainer.innerHTML = "<li>Connexion SFTP en cours...</li>";
+
+        fetch(`${API_URL}/users/files`, {
+            method: "GET",
+            headers: { "Authorization": `Bearer ${token}` }
+        })
+        .then(response => {
+            if (!response.ok) throw new Error("Impossible de joindre le NAS. Vérifie les ports ou l'adresse IP.");
+            return response.json();
+        })
+        .then(data => {
+            infoContainer.innerHTML = `Statut : <span style="color:#2563eb">${data.mode}</span> | Total : ${data.total_files} fichier(s)`;
+            listContainer.innerHTML = "";
+            
+            if (data.files.length === 0) {
+                listContainer.innerHTML = "<li style='color: #64748b;'>Aucun fichier trouvé dans ce dossier sur le Synology.</li>";
+            } else {
+                data.files.forEach(file => {
+                    const li = document.createElement("li");
+                    li.className = "file-item";
+                    li.innerText = "🎬 " + file;
+                    listContainer.appendChild(li);
+                });
+            }
+        })
+        .catch(err => {
+            listContainer.innerHTML = `<li style="color: #ef4444;">❌ Erreur : ${err.message}</li>`;
+        });
+    });
+
+    // --- TRANSMISSION EN FLUX VIA L'API ---
+    document.getElementById("upload-form").addEventListener("submit", function(e) {
+        e.preventDefault();
+        const token = localStorage.getItem("access_token");
+        const statusDiv = document.getElementById("upload-status");
+        
+        const title = document.getElementById("video-title").value;
+        const fileInput = document.getElementById("video-file");
+
+        if (fileInput.files.length === 0) return;
+
+        const formData = new FormData();
+        formData.append("title", title);
+        formData.append("file", fileInput.files[0]);
+
+        statusDiv.style.color = "#3b82f6";
+        statusDiv.innerText = "⏳ Flux SFTP actif : Envoi du fichier vers l'Île-de-France...";
+
+        fetch(`${API_URL}/documents/upload`, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${token}` },
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) throw new Error("Échec du téléversement réseau.");
+            return response.json();
+        })
+        .then(data => {
+            statusDiv.style.color = "#10b981";
+            statusDiv.innerText = `✅ Réussite ! Vidéo "${data.title}" enregistrée physiquement sur le Synology.`;
+            document.getElementById("upload-form").reset();
+            document.getElementById("btn-list-files").click();
+        })
+        .catch(err => {
+            statusDiv.style.color = "#ef4444";
+            statusDiv.innerText = `❌ Erreur : ${err.message}`;
+        });
+    });
+</script>
+</body>
+</html>
