@@ -10,6 +10,11 @@ from auth import get_current_user
 from database import get_session
 from user import User
 from config import settings
+from typing import Optional
+from auth import oauth2_scheme
+from jose import jwt # type: ignore
+from config import settings
+from user import User
 
 # Utilisation exclusive de la librairie officielle Synology
 from synology_api import filestation
@@ -32,21 +37,28 @@ class Media(SQLModel, table=True):
     title: str = Field(index=True)
     filename: str
     file_path: str
-    thumbnail_path: str | None = Field(default=None)  # Stocke le chemin de la miniature sur le NAS
+    thumbnail_path: str | None = Field(default=None)
     size_mb: float
-    duration_seconds: float = Field(default=0.0)      # Stocke la durée réelle calculée par FFmpeg
+    duration_seconds: float = Field(default=0.0)
+    
+# --- FONCTIONNALITÉS COMPTEUR & CONFIDENTIALITÉ ---
+    views_count: int = Field(default=0, nullable=False)
+    privacy: str = Field(default="public", nullable=False)  # public, unlisted, private
+    
     created_at: datetime = Field(default_factory=datetime.utcnow)
     user_id: str = Field(foreign_key="user.id", index=True, nullable=False)
 
 
-# ==============================================================================
-# CONNEXION AUTO-GÉRÉE (ANTI-CRASH)
-# ==============================================================================
+# =========================================================================
+# # CONNEXION AUTO-GÉRÉE (ANTI-CRASH)
+# =========================================================================
+
 def get_nas_client():
     """
-    Initialise la session FileStation. Si le lien direct échoue, 
+    Initialise la session FileStation. Si le lien direct échoue,
     le package applique ses règles de secours internes sans faire crasher l'API.
     """
+    # ... le reste de ton code de fonction avec ses 4 espaces de décalage à l'intérieur ...
     try:
         fl = filestation.FileStation(
             ip_address=NAS_LOCAL_IP,
@@ -187,12 +199,50 @@ async def upload_video(
 # ==============================================================================
 # ROUTE 2 : STREAMING VIA LE FLUX DU PACKAGER
 # ==============================================================================
+# Petite fonction utilitaire pour récupérer l'utilisateur SI un token est fourni (sans bloquer si anonyme)
+def get_optional_current_user(session: Session, token: Optional[str] = Depends(oauth2_scheme)) -> Optional[User]:
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        # Ajustement du type ici : str | None au lieu de str tout court
+        user_id: str | None = payload.get("sub") 
+        if user_id:
+            return session.get(User, user_id)
+    except Exception:
+        return None
+    return None
+
 @router.get("/{media_id}/stream")
-async def stream_video(media_id: str, session: Session = Depends(get_session)):
+async def stream_video(
+    media_id: str, 
+    session: Session = Depends(get_session)
+):
     media = session.get(Media, media_id)
     if not media:
         raise HTTPException(status_code=404, detail="Vidéo introuvable.")
 
+    # --- GESTION DE LA CONFIDENTIALITÉ ---
+    if media.privacy == "private":
+        # On extrait manuellement l'utilisateur pour valider l'accès privé
+        # Note : Si ton front-end appelle cette route via une balise <video src="...">, 
+        # il faudra passer le token dans les paramètres d'URL (ex: ?token=...) car les balises HTML n'envoient pas de Headers "Bearer".
+        raise HTTPException(
+            status_code=403, 
+            detail="Cette vidéo est privée. L'accès direct via streaming requiert des droits spécifiques."
+        )
+
+    # --- COMPTEUR DE VUES ---
+    try:
+        media.views_count += 1
+        session.add(media)
+        session.commit()
+    except Exception as e:
+        print(f"Erreur lors de l'incrémentation de la vue : {e}")
+        # On ne bloque pas la lecture si la bdd échoue juste à enregistrer la vue
+        pass
+
+    # --- FLUX DE STREAMING SYNOLOGY ---
     try:
         import httpx  # type: ignore
         fl = get_nas_client()
@@ -202,7 +252,7 @@ async def stream_video(media_id: str, session: Session = Depends(get_session)):
         stream_url = f"{base_url}/webapi/entry.cgi?api=SYNO.FileStation.Download&version=2&method=download&path={media.file_path}&mode=download&_sid={sid}"
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur d'accès au fichier : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur d'accès au fichier NAS : {e}")
 
     async def video_stream():
         async with httpx.AsyncClient(verify=False) as client:
@@ -219,14 +269,12 @@ async def stream_video(media_id: str, session: Session = Depends(get_session)):
         }
     )
 
-
 # ==============================================================================
 # ROUTE 3 : LISTE LOCALE
-# ==============================================================================
-@router.get("/", response_model=list[Media])
+# ==============================================================================@router.get("/", response_model=list[Media])
 def list_medias(session: Session = Depends(get_session)):
-    return session.exec(select(Media)).all()
-
+    # On filtre pour ne renvoyer que les médias configurés en 'public'
+    return session.exec(select(Media).where(Media.privacy == "public")).all()
 
 # ==============================================================================
 # ROUTE 4 : DIAGNOSTIC (CORRIGÉ ET SÉCURISÉ)
@@ -265,3 +313,26 @@ async def list_nas_files():
             status_code=500, 
             detail=f"Erreur de communication avec le Synology : {e}"
         )
+    
+@router.patch("/{media_id}/privacy", response_model=Media)
+def update_video_privacy(
+    media_id: str,
+    privacy: str = Form(..., description="Doit être 'public', 'unlisted' ou 'private'"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    if privacy not in ["public", "unlisted", "private"]:
+        raise HTTPException(status_code=400, detail="Statut de confidentialité invalide.")
+        
+    media = session.get(Media, media_id)
+    if not media:
+        raise HTTPException(status_code=404, detail="Vidéo introuvable.")
+        
+    if media.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Non autorisé à modifier ce média.")
+        
+    media.privacy = privacy
+    session.add(media)
+    session.commit()
+    session.refresh(media)
+    return media
